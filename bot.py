@@ -1,8 +1,43 @@
-from pyodide.http import pyfetch
+import aiohttp
+from aiohttp import web
+import os
 import json
 import asyncio
 import time
 import urllib.parse
+
+# ================= Render-এর জন্য pyfetch রিপ্লেসমেন্ট =================
+class DummyResponse:
+    def __init__(self, status, text_data):
+        self.status = status
+        self.text = text_data
+
+    async def json(self):
+        if not self.text or self.text.strip() == "null":
+            return None
+        try:
+            return json.loads(self.text)
+        except:
+            return None
+
+async def pyfetch(url, method="GET", headers=None, body=None):
+    async with aiohttp.ClientSession() as session:
+        try:
+            if method == "GET":
+                async with session.get(url, headers=headers) as resp:
+                    return DummyResponse(resp.status, await resp.text())
+            elif method == "PUT":
+                async with session.put(url, headers=headers, data=body) as resp:
+                    return DummyResponse(resp.status, await resp.text())
+            elif method == "POST":
+                async with session.post(url, headers=headers, data=body) as resp:
+                    return DummyResponse(resp.status, await resp.text())
+            elif method == "DELETE":
+                async with session.delete(url, headers=headers) as resp:
+                    return DummyResponse(resp.status, await resp.text())
+        except Exception as e:
+            print(f"Network error: {e}")
+            return DummyResponse(500, "{}")
 
 # ================= কনফিগারেশন =================
 BOT_TOKEN = "8720888225:AAGVNXzmLCLDJfQUvZ5zdieOAhTxddbtrn0"
@@ -455,16 +490,29 @@ async def process_callback(cq):
         await telegram_api_call("answerCallbackQuery", {"callback_query_id": callback_id, "text": "✅ ভিডিও ডিলেট করা হয়েছে!"})
         await telegram_api_call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
-# ================= মূল বট লুপ =================
+# ================= মূল বট লুপ ও সার্ভার স্টার্টার =================
 async def start_bot():
     global users_db, videos_db
-    print("✨ ব্রাউজারে টেলিগ্রাম বট সফলভাবে চালু হয়েছে...")
+    print("✨ Render সার্ভারে টেলিগ্রাম বট সফলভাবে চালু হচ্ছে...")
     
+    # 🟢 Render "Web Service" এর জন্য একটি ডামি HTTP সার্ভার চালু করা হচ্ছে (যাতে Render ক্র্যাশ না করে)
+    app = web.Application()
+    app.router.add_get('/', lambda request: web.Response(text="Bot is running!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render-এর ডিফল্ট পোর্ট নেওয়া, না পেলে ১০০০০ ব্যবহার করা
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"🌐 Dummy web server started on port {port}")
+    
+    # ডেটাবেস লোড
     users_db = await firebase_get_users()
     raw_vids = await firebase_get_videos()
     videos_db = [v for v in raw_vids if isinstance(v, dict) and 'id' in v]
     
-    # 🟢 ব্যাকগ্রাউন্ডে আনলক এবং রিলক মনিটরিং টাস্কগুলো শুরু করা হলো
+    # ব্যাকগ্রাউন্ডে আনলক এবং রিলক মনিটরিং টাস্কগুলো শুরু করা হলো
     asyncio.create_task(check_ad_unlock_requests())
     asyncio.create_task(check_expired_unlocks())
     
@@ -485,4 +533,9 @@ async def start_bot():
                     print(f"Error Processing Update: {e}")
         await asyncio.sleep(1)
 
-await start_bot()
+# ================= অ্যাপলিকেশন রান =================
+if __name__ == "__main__":
+    try:
+        asyncio.run(start_bot())
+    except KeyboardInterrupt:
+        print("Bot stopped by user.")
