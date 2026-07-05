@@ -136,6 +136,49 @@ def get_admin_keyboard():
         "is_persistent": True
     }
 
+def get_video_keyboard(chat_id, video, is_admin=False, is_unlocked=False):
+    """কীবোর্ড এবং লাইক ইমোজি ডাইনামিকভাবে জেনারেট করার ফাংশন"""
+    vid_id = video.get('id', '')
+    video_file_id = video.get('video_id', '')
+    likes = video.get('likes', 0)
+    liked_by = video.get('liked_by', [])
+    
+    # 🟢 লাইক দিলে ইমোজি পরিবর্তন (❤️)
+    like_text = f"❤️ {likes}" if chat_id in liked_by else f"👍 {likes}"
+    
+    if is_admin:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🗑️ Delete Video", "callback_data": f"del_{vid_id}"},
+                    {"text": like_text, "callback_data": f"like_{vid_id}"}
+                ]
+            ]
+        }
+    
+    if is_unlocked:
+        share_text = urllib.parse.quote(f"🔥 চমৎকার সব প্রিমিয়াম ভিডিও ফ্রিতে দেখতে আমাদের বটে যুক্ত হোন!\n\n👉 @{BOT_USERNAME}")
+        share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}&text={share_text}"
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": like_text, "callback_data": f"like_{vid_id}"},
+                    {"text": "📢 Share Bot", "url": share_url}
+                ]
+            ]
+        }
+    else:
+        url_separator = "&" if "?" in WEB_APP_URL else "?"
+        final_web_url = f"{WEB_APP_URL}{url_separator}chat_id={chat_id}&file_id={video_file_id}"
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "🔓 Unlock Video 🔓", "web_app": {"url": final_web_url}},
+                    {"text": like_text, "callback_data": f"like_{vid_id}"}
+                ]
+            ]
+        }
+
 async def broadcast_to_users(video_info):
     print(f"📢 ব্রডকাস্ট শুরু হচ্ছে... টার্গেট ইউজার: {len(users_db)} জন।")
     for user_id in list(users_db):
@@ -146,41 +189,17 @@ async def send_video_post(chat_id, video, is_admin=False):
     if not video or not isinstance(video, dict):
         return
         
-    vid_id = video.get('id', '')
     title = video.get('title', 'No Title')
     desc = video.get('desc', 'No Description')
     thumb_id = video.get('thumb_id', '')
     video_file_id = video.get('video_id', '')
-    likes = video.get('likes', 0)
 
     if not thumb_id:
         return
 
     caption = f"🎬 <b>{title}</b>\n\n📄 {desc}"
-    
-    if is_admin:
-        keyboard = {
-            "inline_keyboard": [
-                [
-                    {"text": "🗑️ Delete Video", "callback_data": f"del_{vid_id}"},
-                    {"text": f"👍 {likes}", "callback_data": f"like_{vid_id}"}
-                ]
-            ]
-        }
-    else:
-        url_separator = "&" if "?" in WEB_APP_URL else "?"
-        final_web_url = f"{WEB_APP_URL}{url_separator}chat_id={chat_id}&file_id={video_file_id}"
+    keyboard = get_video_keyboard(chat_id, video, is_admin, is_unlocked=False)
 
-        keyboard = {
-            "inline_keyboard": [
-                [
-                    {"text": "🔓 Unlock Video 🔓", "web_app": {"url": final_web_url}},
-                    {"text": f"👍 {likes}", "callback_data": f"like_{vid_id}"}
-                ]
-            ]
-        }
-
-    # মেসেজ পে-লোড তৈরি
     payload = {
         "chat_id": chat_id,
         "photo": thumb_id,
@@ -200,6 +219,42 @@ async def send_video_post(chat_id, video, is_admin=False):
         url = f"{FIREBASE_DB_URL}/msg_tracks/{chat_id}_{video_file_id}.json"
         await pyfetch(url, method="PUT", headers={"Content-Type": "application/json"}, body=json.dumps(msg_id))
 
+async def update_all_likes(video):
+    """যেকোনো ইউজার লাইক দিলে সবার স্ক্রিনে লাইক কাউন্ট ও ইমোজি লাইভ আপডেট হবে"""
+    video_file_id = video.get('video_id', '')
+    
+    tracks_resp = await pyfetch(f"{FIREBASE_DB_URL}/msg_tracks.json", method="GET")
+    tracks = await tracks_resp.json() if tracks_resp.status == 200 else {}
+    
+    unlocks_resp = await pyfetch(f"{FIREBASE_DB_URL}/active_unlocks.json", method="GET")
+    unlocks = await unlocks_resp.json() if unlocks_resp.status == 200 else {}
+    
+    if not tracks or not isinstance(tracks, dict):
+        return
+        
+    active_unlocked_keys = set(unlocks.keys()) if isinstance(unlocks, dict) else set()
+    
+    for key, msg_id in tracks.items():
+        if key.endswith(f"_{video_file_id}"):
+            chat_id_str = key.split("_")[0]
+            try:
+                chat_id = int(chat_id_str)
+            except:
+                continue
+            
+            is_unlocked = key in active_unlocked_keys
+            is_admin = (chat_id == ADMIN_ID)
+            
+            # সবার জন্য নতুন কীবোর্ড (নতুন লাইক নাম্বারসহ) জেনারেট হচ্ছে
+            kb = get_video_keyboard(chat_id, video, is_admin, is_unlocked)
+            
+            await telegram_api_call("editMessageReplyMarkup", {
+                "chat_id": chat_id,
+                "message_id": int(msg_id),
+                "reply_markup": kb
+            })
+            await asyncio.sleep(0.05) # রেট লিমিট থেকে বাঁচতে ছোট্ট ডিলে
+
 # ================= অটো-ডেলিভারি এবং টাইমার ফাংশনস =================
 async def check_ad_unlock_requests():
     """অ্যাড দেখার পর ভিডিও আনলক করার প্রক্রিয়া"""
@@ -215,36 +270,23 @@ async def check_ad_unlock_requests():
                         file_id = req_data.get("file_id")
                         
                         if chat_id and file_id:
-                            print(f"🚀 Unlocking Video -> User: {chat_id}, File: {file_id}")
-                            
                             track_url = f"{FIREBASE_DB_URL}/msg_tracks/{chat_id}_{file_id}.json"
                             track_resp = await pyfetch(track_url, method="GET")
                             
                             video_item = next((v for v in videos_db if v["video_id"] == file_id), None)
-                            v_id = video_item["id"] if video_item else str(int(time.time()))
-                            title = video_item["title"] if video_item else "Premium Video"
-                            desc = video_item["desc"] if video_item else ""
-                            likes = video_item["likes"] if video_item else 0
+                            if not video_item:
+                                continue
                             
-                            # 🟢 শুধু বটের ইউজারনেম এবং লিংক শেয়ার হবে
-                            share_text = urllib.parse.quote(f"🔥 চমৎকার সব প্রিমিয়াম ভিডিও ফ্রিতে দেখতে আমাদের বটে যুক্ত হোন!\n\n👉 @{BOT_USERNAME}")
-                            share_url = f"https://t.me/share/url?url=https://t.me/{BOT_USERNAME}&text={share_text}"
-                            
-                            unlocked_keyboard = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": f"👍 {likes}", "callback_data": f"like_{v_id}"},
-                                        {"text": "📢 Share Bot", "url": share_url}
-                                    ]
-                                ]
-                            }
-                            
+                            title = video_item.get("title", "Premium Video")
+                            desc = video_item.get("desc", "")
                             caption_text = f"🎬 <b>{title}</b>\n\n📄 {desc}\n\n🎉 <i>ভিডিওটি আনলক করা হয়েছে (১৫ মিনিট পর পুনরায় লক হয়ে যাবে)।</i>"
+
+                            unlocked_keyboard = get_video_keyboard(chat_id, video_item, is_admin=False, is_unlocked=True)
 
                             if track_resp.status == 200 and track_resp.text:
                                 msg_id = await track_resp.json()
                                 if msg_id:
-                                    # থাম্বনেইল পরিবর্তন করে ভিডিও বসানো হচ্ছে (editMessageMedia অরিজিনাল মেসেজের protect_content ধরে রাখে)
+                                    # থাম্বনেইল পরিবর্তন করে ভিডিও বসানো হচ্ছে
                                     await telegram_api_call("editMessageMedia", {
                                         "chat_id": chat_id,
                                         "message_id": int(msg_id),
@@ -257,7 +299,7 @@ async def check_ad_unlock_requests():
                                         "reply_markup": unlocked_keyboard
                                     })
                                     
-                                    # 🟢 ১৫ মিনিটের টাইমারের জন্য রেকর্ড ফায়ারবেসে সেভ করা হচ্ছে
+                                    # ১৫ মিনিটের টাইমারের জন্য রেকর্ড ফায়ারবেসে সেভ
                                     unlock_record = {
                                         "chat_id": chat_id,
                                         "message_id": int(msg_id),
@@ -266,12 +308,9 @@ async def check_ad_unlock_requests():
                                     }
                                     await pyfetch(f"{FIREBASE_DB_URL}/active_unlocks/{chat_id}_{file_id}.json", method="PUT", headers={"Content-Type": "application/json"}, body=json.dumps(unlock_record))
                                     
-                                    # পুরনো ট্র্যাক মুছে ফেলা
-                                    await pyfetch(track_url, method="DELETE")
                                     await pyfetch(f"{FIREBASE_DB_URL}/unlock_requests/{req_id}.json", method="DELETE")
                                     continue
                             
-                            # প্রসেসড রিকোয়েস্টটি ফায়ারবেস থেকে ডিলিট
                             await pyfetch(f"{FIREBASE_DB_URL}/unlock_requests/{req_id}.json", method="DELETE")
         except Exception as e:
             pass
@@ -293,33 +332,18 @@ async def check_expired_unlocks():
                         file_id = record.get("file_id")
                         unlock_time = record.get("unlock_time", 0)
                         
-                        # 🟢 ৯০০ সেকেন্ড = ১৫ মিনিট
+                        # ৯০০ সেকেন্ড = ১৫ মিনিট
                         if current_time - unlock_time >= 900:
-                            print(f"🔒 Relocking Video -> User: {chat_id}, File: {file_id}")
-                            
                             video = next((v for v in videos_db if v["video_id"] == file_id), None)
                             if video:
-                                v_id = video["id"]
                                 title = video.get("title", "Premium Video")
                                 desc = video.get("desc", "")
                                 thumb_id = video.get("thumb_id", "")
-                                likes = video.get("likes", 0)
-                                
                                 caption = f"🎬 <b>{title}</b>\n\n📄 {desc}\n\n🔒 <i>সময় শেষ! ভিডিওটি পুনরায় লক হয়ে গেছে। আবার দেখতে আনলক করুন।</i>"
                                 
-                                url_separator = "&" if "?" in WEB_APP_URL else "?"
-                                final_web_url = f"{WEB_APP_URL}{url_separator}chat_id={chat_id}&file_id={file_id}"
+                                locked_keyboard = get_video_keyboard(chat_id, video, is_admin=False, is_unlocked=False)
                                 
-                                locked_keyboard = {
-                                    "inline_keyboard": [
-                                        [
-                                            {"text": "🔓 Unlock Video 🔓", "web_app": {"url": final_web_url}},
-                                            {"text": f"👍 {likes}", "callback_data": f"like_{v_id}"}
-                                        ]
-                                    ]
-                                }
-                                
-                                # ভিডিওটিকে পরিবর্তন করে পুনরায় থাম্বনেইল ফটো বসানো হচ্ছে
+                                # পুনরায় থাম্বনেইল ফটো বসানো হচ্ছে
                                 await telegram_api_call("editMessageMedia", {
                                     "chat_id": chat_id,
                                     "message_id": int(msg_id),
@@ -332,11 +356,9 @@ async def check_expired_unlocks():
                                     "reply_markup": locked_keyboard
                                 })
                                 
-                                # আবার আনলক করার জন্য ট্র্যাক হিস্টোরি রিস্টোর করা হচ্ছে
                                 track_url = f"{FIREBASE_DB_URL}/msg_tracks/{chat_id}_{file_id}.json"
                                 await pyfetch(track_url, method="PUT", headers={"Content-Type": "application/json"}, body=json.dumps(msg_id))
                             
-                            # ১৫ মিনিট পার হয়ে যাওয়ার পর টাইমার লিস্ট থেকে মুছে ফেলা
                             await pyfetch(f"{FIREBASE_DB_URL}/active_unlocks/{key}.json", method="DELETE")
         except Exception as e:
             pass
@@ -361,13 +383,12 @@ async def process_message(msg):
                 "reply_markup": get_admin_keyboard()
             })
             
-            # অ্যাডমিনকে ডেটাবেসের সব ভিডিও দেখানো হচ্ছে
             if not videos_db:
                 await telegram_api_call("sendMessage", {"chat_id": chat_id, "text": "এখনো কোনো ভিডিও আপলোড করা হয়নি।"})
             else:
                 for video in videos_db:
                     await send_video_post(chat_id, video, is_admin=True)
-                    await asyncio.sleep(0.5) # রেট লিমিট এড়াতে একটু ডিলে
+                    await asyncio.sleep(0.5) 
         else:
             await telegram_api_call("sendMessage", {
                 "chat_id": chat_id,
@@ -454,7 +475,7 @@ async def process_callback(cq):
             if not isinstance(liked_by, list):
                 liked_by = []
             
-            if chat_id != ADMIN_ID and chat_id in liked_by:
+            if chat_id in liked_by:
                 await telegram_api_call("answerCallbackQuery", {
                     "callback_query_id": callback_id, 
                     "text": "❌ আপনি ইতিমধ্যে এই ভিডিওটি লাইক করেছেন!",
@@ -462,25 +483,16 @@ async def process_callback(cq):
                 })
                 return
             
+            # লাইক কাউন্ট ও ইউজার যুক্ত করা
             video['likes'] = video.get('likes', 0) + 1
-            if chat_id != ADMIN_ID:
-                liked_by.append(chat_id)
+            liked_by.append(chat_id)
             video['liked_by'] = liked_by
             
             asyncio.create_task(firebase_save_video(video))
             await telegram_api_call("answerCallbackQuery", {"callback_query_id": callback_id, "text": "❤️ আপনি ভিডিওটি লাইক করেছেন!"})
             
-            current_keyboard = cq["message"]["reply_markup"]
-            for row in current_keyboard["inline_keyboard"]:
-                for btn in row:
-                    if btn.get("callback_data") == data:
-                        btn["text"] = f"👍 {video['likes']}"
-            
-            await telegram_api_call("editMessageReplyMarkup", {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "reply_markup": current_keyboard
-            })
+            # 🟢 সবার কাছে লাইভ আপডেট পাঠানো হচ্ছে
+            asyncio.create_task(update_all_likes(video))
 
     elif data.startswith("del_") and chat_id == ADMIN_ID:
         vid_id = data.split("_")[1]
@@ -495,13 +507,12 @@ async def start_bot():
     global users_db, videos_db
     print("✨ Render সার্ভারে টেলিগ্রাম বট সফলভাবে চালু হচ্ছে...")
     
-    # 🟢 Render "Web Service" এর জন্য একটি ডামি HTTP সার্ভার চালু করা হচ্ছে (যাতে Render ক্র্যাশ না করে)
+    # Render "Web Service" এর জন্য একটি ডামি HTTP সার্ভার চালু করা হচ্ছে
     app = web.Application()
     app.router.add_get('/', lambda request: web.Response(text="Bot is running!"))
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render-এর ডিফল্ট পোর্ট নেওয়া, না পেলে ১০০০০ ব্যবহার করা
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
@@ -512,7 +523,7 @@ async def start_bot():
     raw_vids = await firebase_get_videos()
     videos_db = [v for v in raw_vids if isinstance(v, dict) and 'id' in v]
     
-    # ব্যাকগ্রাউন্ডে আনলক এবং রিলক মনিটরিং টাস্কগুলো শুরু করা হলো
+    # ব্যাকগ্রাউন্ড টাস্কগুলো শুরু করা হলো
     asyncio.create_task(check_ad_unlock_requests())
     asyncio.create_task(check_expired_unlocks())
     
